@@ -2,6 +2,7 @@ old/
 __pycache__/
 *.py[cod]
 *.exe
+*.bat
 .env
 .venv/
 venv/
