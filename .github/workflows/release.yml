@@ -1,0 +1,125 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Determine next patch version
+        id: version
+        shell: pwsh
+        run: |
+          $tags = @(
+            git tag --list "0.1.*" | ForEach-Object {
+              $tag = [string]$_
+              if ($tag -match '^0\.1\.(\d+)$') {
+                [pscustomobject]@{
+                  Name = $tag
+                  Patch = [int]$Matches[1]
+                }
+              }
+            } | Sort-Object -Property Patch -Descending
+          )
+          if ($tags.Count -eq 0) {
+            $next = "0.1.0"
+            $previousTag = ""
+          } else {
+            $latest = $tags[0]
+            $patch = $latest.Patch + 1
+            $next = "0.1.$patch"
+            $previousTag = $latest.Name
+          }
+          "version=$next" >> $env:GITHUB_OUTPUT
+          "app_version=$next" >> $env:GITHUB_OUTPUT
+          "previous_tag=$previousTag" >> $env:GITHUB_OUTPUT
+
+      - name: Bake release version
+        shell: pwsh
+        run: |
+          Set-Content -Path "youtube_to_mp3\_version_build.py" -Value "APP_VERSION = `"${{ steps.version.outputs.app_version }}`"" -Encoding UTF8
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build portable executable
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --icon "icon.ico" `
+            --name "YouTube to MP3" `
+            --add-data "icon.ico;." `
+            "app.py"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler was not found at $iscc"
+          }
+          $version = "${{ steps.version.outputs.app_version }}"
+          & $iscc "/DMyAppVersion=$version" "installer\YoutubeToMP3.iss"
+
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          $previousTag = "${{ steps.version.outputs.previous_tag }}"
+          if ([string]::IsNullOrWhiteSpace($previousTag)) {
+            $commits = @(git log --pretty=format:"- %s (%h)" --max-count=50)
+          } else {
+            $commits = @(git log --pretty=format:"- %s (%h)" "$previousTag..HEAD")
+          }
+          if ($commits.Count -eq 0) {
+            $commits = @("- No code changes since the previous release.")
+          }
+          $notes = @(
+            "## Changes",
+            ""
+          ) + $commits + @(
+            "",
+            "## Download",
+            "- ``YouTube to MP3 Setup.exe`` installs to ``%LocalAppData%\Programs\YouTube to MP3`` and can add Start Menu and desktop shortcuts.",
+            "- ``YouTube to MP3.exe`` is the portable version."
+          )
+          Set-Content -Path "release_notes.md" -Value $notes -Encoding UTF8
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" `
+            "dist\YouTube to MP3.exe" `
+            "installer\output\YouTube to MP3 Setup.exe" `
+            --title "${{ steps.version.outputs.version }}" `
+            --notes-file "release_notes.md" `
+            --latest
