@@ -10,11 +10,10 @@ from youtube_to_mp3.qt_compat import (
     exec_dialog,
 )
 from youtube_to_mp3.updates import check_for_update, install_update
-from youtube_to_mp3.version import APP_NAME, APP_VERSION
+from youtube_to_mp3.version import APP_NAME
 
 
 def start_update_check(log, signals):
-    log(f"Checking for updates (v{APP_VERSION})...", "info")
     threading.Thread(target=run_update_check, args=(signals,), daemon=True).start()
 
 

@@ -68,7 +68,6 @@ class YoutubeToMP3Window(QMainWindow):
         self.setMinimumSize(520, 380)
         self.build_ui()
         self.apply_styles()
-        self.append_log("Ready.", "info")
         QTimer.singleShot(700, self.check_for_updates_on_launch)
 
     def build_ui(self):
@@ -97,19 +96,20 @@ class YoutubeToMP3Window(QMainWindow):
         self.open_folder_button = QPushButton("Open Folder")
         self.open_folder_button.clicked.connect(self.open_download_folder)
 
-        self.settings_button = QPushButton("Settings")
-        self.settings_button.clicked.connect(self.open_settings)
-
         path_row = QHBoxLayout()
         path_row.addWidget(self.path_input, 1)
         path_row.addWidget(self.open_folder_button)
-        path_row.addWidget(self.settings_button)
         layout.addLayout(path_row)
 
         actions_row = QHBoxLayout()
         self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.clear_log)
-        actions_row.addWidget(self.clear_log_button)
+
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.clicked.connect(self.open_settings)
+
+        actions_row.addWidget(self.clear_log_button, 1)
+        actions_row.addWidget(self.settings_button, 1)
         layout.addLayout(actions_row)
 
         self.log_view = QTextEdit()
@@ -121,6 +121,12 @@ class YoutubeToMP3Window(QMainWindow):
 
     def apply_styles(self):
         self.setStyleSheet(APP_STYLES)
+        self.sync_button_widths()
+
+    def sync_button_widths(self):
+        width = self.download_button.sizeHint().width()
+        self.download_button.setFixedWidth(width)
+        self.open_folder_button.setFixedWidth(width)
 
     def append_log(self, message, level="info"):
         color = LOG_COLORS.get(level, LOG_COLORS["info"])
