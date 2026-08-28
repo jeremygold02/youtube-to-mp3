@@ -38,7 +38,7 @@ def show_settings_dialog(
 
     actions_row = QHBoxLayout()
     check_updates_button = QPushButton("Check for Updates")
-    update_tools_button = QPushButton("Update yt-dlp & Deno")
+    update_tools_button = QPushButton("Update yt-dlp, Deno & FFmpeg")
     close_button = QPushButton("Close")
     actions_row.addWidget(check_updates_button)
     actions_row.addWidget(update_tools_button)

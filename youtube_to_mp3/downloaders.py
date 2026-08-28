@@ -1,6 +1,10 @@
 import os
+import platform
 import re
+import shutil
 import subprocess
+import tempfile
+import zipfile
 
 import requests
 
@@ -8,12 +12,35 @@ from youtube_to_mp3.runtime import hidden_subprocess_kwargs
 
 
 YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+FFMPEG_RELEASE_URL = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest"
+FFMPEG_EXECUTABLES = ("ffmpeg.exe", "ffprobe.exe")
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
     "Gecko/20100101 Firefox/128.0"
 )
 YOUTUBE_REFERER = "https://www.youtube.com/"
 GITHUB_REFERER = "https://github.com/yt-dlp/yt-dlp"
+
+
+def ffmpeg_download_url():
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        platform_name = "winarm64"
+    elif machine in {"x86", "i386", "i686"}:
+        platform_name = "win32"
+    else:
+        platform_name = "win64"
+    filename = f"ffmpeg-master-latest-{platform_name}-gpl.zip"
+    return f"{FFMPEG_RELEASE_URL}/{filename}"
+
+
+def local_ffmpeg_directory(target_path):
+    if all(
+        os.path.isfile(os.path.join(target_path, filename))
+        for filename in FFMPEG_EXECUTABLES
+    ):
+        return target_path
+    return None
 
 
 def extract_percent(text):
@@ -61,6 +88,81 @@ class DownloadManager:
 
         self.log("yt-dlp downloaded successfully.", "success")
 
+    def download_ffmpeg(self, target_path):
+        os.makedirs(target_path, exist_ok=True)
+        self.log("Downloading FFmpeg (this can take a few minutes)...", "success")
+
+        with tempfile.TemporaryDirectory(
+            prefix=".ytmp3-ffmpeg-", dir=target_path
+        ) as temp_dir:
+            archive_path = os.path.join(temp_dir, "ffmpeg.zip")
+            response = requests.get(
+                ffmpeg_download_url(),
+                headers={
+                    "User-Agent": BROWSER_USER_AGENT,
+                    "Referer": "https://github.com/yt-dlp/FFmpeg-Builds",
+                },
+                stream=True,
+                timeout=300,
+            )
+            response.raise_for_status()
+
+            total_bytes = int(response.headers.get("content-length") or 0)
+            downloaded_bytes = 0
+            next_progress = 10
+            with open(archive_path, "wb") as archive_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    archive_file.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if total_bytes:
+                        percent = int(downloaded_bytes * 100 / total_bytes)
+                        if percent >= next_progress:
+                            self.log(f"FFmpeg download... {percent}%", "process")
+                            next_progress = (percent // 10 + 1) * 10
+
+            extracted_files = {}
+            with zipfile.ZipFile(archive_path) as archive:
+                archive_members = {
+                    member.filename.rsplit("/", 1)[-1].lower(): member
+                    for member in archive.infolist()
+                    if not member.is_dir()
+                }
+                missing_files = [
+                    filename
+                    for filename in FFMPEG_EXECUTABLES
+                    if filename not in archive_members
+                ]
+                if missing_files:
+                    raise RuntimeError(
+                        "FFmpeg download did not contain " + ", ".join(missing_files)
+                    )
+
+                for filename in FFMPEG_EXECUTABLES:
+                    extracted_path = os.path.join(temp_dir, filename)
+                    with archive.open(archive_members[filename]) as source:
+                        with open(extracted_path, "wb") as destination:
+                            shutil.copyfileobj(source, destination)
+                    extracted_files[filename] = extracted_path
+
+            for filename, extracted_path in extracted_files.items():
+                os.replace(extracted_path, os.path.join(target_path, filename))
+
+        self.log("FFmpeg installed successfully.", "success")
+
+    def ensure_ffmpeg(self, target_path):
+        if local_ffmpeg_directory(target_path):
+            self.log("FFmpeg is already installed for this app.", "success")
+            return True
+        if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+            self.log("FFmpeg is already installed on this system.", "success")
+            return True
+
+        self.log("FFmpeg was not found; installing a portable copy...", "warning")
+        self.download_ffmpeg(target_path)
+        return True
+
     def ensure_ytdlp_and_download(self, url, target_path, no_playlist):
         self.log("Checking yt-dlp...", "warning")
         os.makedirs(target_path, exist_ok=True)
@@ -69,6 +171,7 @@ class DownloadManager:
         if not os.path.exists(ytdlp_path):
             self.download_yt_dlp(ytdlp_path)
 
+        self.ensure_ffmpeg(target_path)
         self.download_audio(url, target_path, no_playlist)
 
     def force_update_yt(self, target_path):
@@ -113,7 +216,7 @@ class DownloadManager:
         return False
 
     def force_update_tools(self, target_path):
-        self.log("Updating yt-dlp and Deno...", "info")
+        self.log("Updating yt-dlp and Deno, and checking FFmpeg...", "info")
 
         ytdlp_updated = True
         try:
@@ -123,12 +226,31 @@ class DownloadManager:
             self.log(f"yt-dlp update failed: {error}", "error")
 
         deno_updated = self.force_update_deno()
-        if ytdlp_updated and deno_updated:
-            self.log("yt-dlp and Deno updated successfully.", "success")
-        elif ytdlp_updated or deno_updated:
-            self.log("Update finished with one failure.", "warning")
+        ffmpeg_ready = True
+        try:
+            self.ensure_ffmpeg(target_path)
+        except Exception as error:
+            ffmpeg_ready = False
+            self.log(f"FFmpeg install failed: {error}", "error")
+
+        failed_tools = [
+            name
+            for name, succeeded in (
+                ("yt-dlp", ytdlp_updated),
+                ("Deno", deno_updated),
+                ("FFmpeg", ffmpeg_ready),
+            )
+            if not succeeded
+        ]
+        if not failed_tools:
+            self.log("Download tools updated successfully.", "success")
+        elif len(failed_tools) < 3:
+            self.log(
+                f"Tool update finished with failures: {', '.join(failed_tools)}.",
+                "warning",
+            )
         else:
-            self.log("yt-dlp and Deno updates failed.", "error")
+            self.log("Download tool updates failed.", "error")
 
     def download_audio(self, url, target_path, no_playlist):
         ytdlp_path = os.path.join(target_path, "yt-dlp.exe")
@@ -145,6 +267,9 @@ class DownloadManager:
             "-o",
             os.path.join(target_path, "%(title)s.%(ext)s"),
         ]
+        ffmpeg_directory = local_ffmpeg_directory(target_path)
+        if ffmpeg_directory:
+            cmd.extend(["--ffmpeg-location", ffmpeg_directory])
         if no_playlist:
             cmd.append("--no-playlist")
         cmd.append(url)
