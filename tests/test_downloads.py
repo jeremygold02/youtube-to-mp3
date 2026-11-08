@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from youtube_to_mp3 import app as app_module
+from youtube_to_mp3 import app as app_module, update_flow
 from youtube_to_mp3.downloaders import DownloadManager, extract_percent
 
 
@@ -37,6 +37,7 @@ class DownloadCommandTests(unittest.TestCase):
         self.assertNotIn("--merge-output-format", command)
         self.assertEqual(command[-1], "https://example.com/video")
         self.assertIn(("Download complete.", "success"), self.messages)
+        self.assertEqual(command[command.index("--concurrent-fragments") + 1], "4")
 
     def test_progress_ignores_urls_filenames_and_out_of_range_values(self):
         cases = (
@@ -55,10 +56,14 @@ class DownloadCommandTests(unittest.TestCase):
     def test_download_progress_is_reported_once_per_update(self):
         process = Mock(
             stdout=io.StringIO(
+                "[youtube] Extracting URL: https://example.com\n"
+                '__YTMP3_TITLE__:"Example video"\n'
                 "[download] Destination: example.mp4\n"
                 "[download]  7.3% of 10MiB\n"
                 "[download]  7.9% of 10MiB\n"
                 "[Merger] Merging formats\n"
+                "Deleting original file example.mp4\n"
+                "[VideoRemuxer] Not remuxing media file\n"
             ),
             returncode=0,
         )
@@ -68,10 +73,18 @@ class DownloadCommandTests(unittest.TestCase):
         progress = [(message, level) for message, level in self.messages if level == "progress"]
         self.assertEqual(
             progress,
-            [("[download]  7.3% of 10MiB", "progress"), ("[download]  7.9% of 10MiB", "progress")],
+            [("Downloading 7.3% of 10MiB", "progress"), ("Downloading 7.9% of 10MiB", "progress")],
         )
-        self.assertIn(("[Merger] Merging formats", "process"), self.messages)
-        self.assertFalse(any(message.startswith("Downloading... ") for message, _ in self.messages))
+        self.assertEqual(
+            self.messages,
+            [
+                ("Preparing download...", "info"),
+                ("Downloading: Example video", "info"),
+                *progress,
+                ("Combining video and audio...", "info"),
+                ("Download complete.", "success"),
+            ],
+        )
 
     def test_mp4_applies_maximum_height_and_remuxes(self):
         command = self.run_download("mp4", height=720)
@@ -84,6 +97,7 @@ class DownloadCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--remux-video") + 1], "mp4")
         self.assertNotIn("--no-playlist", command)
         self.assertNotIn("-x", command)
+        self.assertEqual(command[command.index("--concurrent-fragments") + 1], "4")
 
     def test_mp4_best_available_has_no_height_filter(self):
         command = self.run_download("mp4")
@@ -100,6 +114,39 @@ class DownloadCommandTests(unittest.TestCase):
             with patch("youtube_to_mp3.downloaders.subprocess.Popen", return_value=process):
                 self.manager.download_media("url", "output", False, "mp4", 2160)
         self.assertIn(("Download failed.", "error"), self.messages)
+
+    def test_warnings_and_errors_remain_visible_without_duplicate_failure(self):
+        process = Mock(
+            stdout=io.StringIO("WARNING: Try another format\nERROR: Video unavailable\n"),
+            returncode=1,
+        )
+        with patch("youtube_to_mp3.downloaders.local_ffmpeg_directory", return_value=None):
+            with patch("youtube_to_mp3.downloaders.subprocess.Popen", return_value=process):
+                self.manager.download_media("url", "output", False, "mp4", 2160)
+        self.assertEqual(
+            self.messages,
+            [
+                ("Preparing download...", "info"),
+                ("WARNING: Try another format", "warning"),
+                ("Download failed: Video unavailable", "error"),
+            ],
+        )
+
+    def test_playlist_titles_remain_visible(self):
+        process = Mock(
+            stdout=io.StringIO(
+                '__YTMP3_TITLE__:"First item"\n'
+                "[download] 100% of 1MiB\n"
+                '__YTMP3_TITLE__:"Second item"\n'
+                "[download] 100% of 1MiB\n"
+            ),
+            returncode=0,
+        )
+        with patch("youtube_to_mp3.downloaders.local_ffmpeg_directory", return_value=None):
+            with patch("youtube_to_mp3.downloaders.subprocess.Popen", return_value=process):
+                self.manager.download_media("url", "output", False, "mp4", 2160)
+        self.assertIn(("Downloading: First item", "info"), self.messages)
+        self.assertIn(("Downloading: Second item", "info"), self.messages)
 
     def test_invalid_format_or_height_fails_before_creating_output_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -310,7 +357,7 @@ class DownloadWindowTests(unittest.TestCase):
             self.window.open_settings()
         show_settings.assert_called_once_with(
             self.window, "a folder", self.window.choose_download_folder,
-            self.window.start_tools_update, self.window.check_for_updates_on_launch,
+            self.window.start_tools_update, self.window.check_for_updates,
         )
         self.window.start_tools_update()
         self.window.start_background_task.assert_called_once_with(
@@ -326,6 +373,27 @@ class DownloadWindowTests(unittest.TestCase):
         self.assertFalse(self.window.busy)
         self.assertTrue(self.window.download_button.isEnabled())
         self.assertIn("test failure", self.window.log_view.toPlainText())
+
+
+class UpdateCheckTests(unittest.TestCase):
+    def test_automatic_up_to_date_check_is_silent_but_manual_check_reports(self):
+        result = {"update_available": False, "message": "Up to date"}
+        signals = Mock()
+        with patch.object(update_flow, "check_for_update", return_value=result):
+            update_flow.run_update_check(signals, silent_if_current=True)
+            signals.update_check_complete.emit.assert_not_called()
+            update_flow.run_update_check(signals)
+            signals.update_check_complete.emit.assert_called_once_with(result)
+
+    def test_automatic_update_and_failures_are_still_reported(self):
+        signals = Mock()
+        result = {"update_available": True}
+        with patch.object(update_flow, "check_for_update", return_value=result):
+            update_flow.run_update_check(signals, silent_if_current=True)
+        signals.update_check_complete.emit.assert_called_once_with(result)
+        with patch.object(update_flow, "check_for_update", side_effect=RuntimeError("offline")):
+            update_flow.run_update_check(signals, silent_if_current=True)
+        signals.update_check_failed.emit.assert_called_once_with("offline")
 
 
 if __name__ == "__main__":

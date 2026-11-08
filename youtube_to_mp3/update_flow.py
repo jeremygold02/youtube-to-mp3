@@ -13,18 +13,21 @@ from youtube_to_mp3.updates import check_for_update, install_update
 from youtube_to_mp3.version import APP_NAME
 
 
-def start_update_check(log, signals):
-    threading.Thread(target=run_update_check, args=(signals,), daemon=True).start()
+def start_update_check(log, signals, *, silent_if_current=False):
+    threading.Thread(
+        target=run_update_check, args=(signals, silent_if_current), daemon=True
+    ).start()
 
 
-def run_update_check(signals):
+def run_update_check(signals, silent_if_current=False):
     try:
         update = check_for_update()
     except Exception as error:
         signals.update_check_failed.emit(str(error))
         return
 
-    signals.update_check_complete.emit(update)
+    if not silent_if_current or update.get("update_available"):
+        signals.update_check_complete.emit(update)
 
 
 def handle_update_check_failed(log, message):

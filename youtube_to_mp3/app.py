@@ -361,6 +361,9 @@ class YoutubeToMP3Window(QMainWindow):
         self.signals.log.emit(message, level)
 
     def check_for_updates_on_launch(self):
+        start_update_check(self.append_log, self.signals, silent_if_current=True)
+
+    def check_for_updates(self):
         start_update_check(self.append_log, self.signals)
 
     def handle_update_check_failed(self, message):
@@ -422,7 +425,7 @@ class YoutubeToMP3Window(QMainWindow):
             self.download_path,
             self.choose_download_folder,
             self.start_tools_update,
-            self.check_for_updates_on_launch,
+            self.check_for_updates,
         )
 
     def open_download_folder(self):

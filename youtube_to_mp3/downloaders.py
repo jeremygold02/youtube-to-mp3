@@ -1,3 +1,4 @@
+import json
 import os
 import platform
 import re
@@ -20,6 +21,7 @@ BROWSER_USER_AGENT = (
 )
 YOUTUBE_REFERER = "https://www.youtube.com/"
 GITHUB_REFERER = "https://github.com/yt-dlp/yt-dlp"
+TITLE_MARKER = "__YTMP3_TITLE__:"
 
 
 def ffmpeg_download_url():
@@ -81,7 +83,7 @@ class DownloadManager:
                 if total_bytes:
                     percent = int(downloaded_bytes * 100 / total_bytes)
                     if percent >= next_progress:
-                        self.log(f"yt-dlp download... {percent}%", "process")
+                        self.log(f"yt-dlp download... {percent}%", "progress")
                         next_progress += 10
 
         self.log("yt-dlp downloaded successfully.", "success")
@@ -117,7 +119,7 @@ class DownloadManager:
                     if total_bytes:
                         percent = int(downloaded_bytes * 100 / total_bytes)
                         if percent >= next_progress:
-                            self.log(f"FFmpeg download... {percent}%", "process")
+                            self.log(f"FFmpeg download... {percent}%", "progress")
                             next_progress = (percent // 10 + 1) * 10
 
             extracted_files = {}
@@ -151,10 +153,8 @@ class DownloadManager:
 
     def ensure_ffmpeg(self, target_path):
         if local_ffmpeg_directory(target_path):
-            self.log("FFmpeg is already installed for this app.", "success")
             return True
         if shutil.which("ffmpeg") and shutil.which("ffprobe"):
-            self.log("FFmpeg is already installed on this system.", "success")
             return True
 
         self.log("FFmpeg was not found; installing a portable copy...", "warning")
@@ -173,7 +173,6 @@ class DownloadManager:
         ):
             raise ValueError("Video quality must be a positive resolution.")
 
-        self.log("Checking yt-dlp...", "warning")
         os.makedirs(target_path, exist_ok=True)
 
         ytdlp_path = os.path.join(target_path, "yt-dlp.exe")
@@ -266,6 +265,11 @@ class DownloadManager:
         cmd = [
             ytdlp_path,
             "--newline",
+            "--no-quiet",
+            "--concurrent-fragments",
+            "4",
+            "--print",
+            f"before_dl:{TITLE_MARKER}%(title)j",
             "--user-agent",
             BROWSER_USER_AGENT,
             "--referer",
@@ -295,7 +299,7 @@ class DownloadManager:
             cmd.append("--no-playlist")
         cmd.append(url)
 
-        self.log(f"Downloading {'audio' if output_format == 'mp3' else 'video'}...", "warning")
+        self.log("Preparing download...", "info")
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -307,6 +311,7 @@ class DownloadManager:
         )
 
         last_output = ""
+        last_error = ""
         if process.stdout is not None:
             with process.stdout:
                 for line in process.stdout:
@@ -315,12 +320,39 @@ class DownloadManager:
                         if not clean_line:
                             continue
                         last_output = clean_line
-                        level = "progress" if extract_percent(clean_line) is not None else "process"
-                        self.log(clean_line, level)
+                        if clean_line.startswith(TITLE_MARKER):
+                            raw_title = clean_line[len(TITLE_MARKER):]
+                            try:
+                                title = json.loads(raw_title)
+                            except json.JSONDecodeError:
+                                title = raw_title
+                            title = str(title).replace("\r", " ").replace("\n", " ").strip()
+                            if title:
+                                self.log(f"Downloading: {title}", "info")
+                        elif extract_percent(clean_line) is not None:
+                            progress = clean_line[len("[download]"):].strip()
+                            self.log(f"Downloading {progress}", "progress")
+                        elif clean_line.startswith("WARNING:"):
+                            self.log(clean_line, "warning")
+                        elif clean_line.startswith("ERROR:"):
+                            last_error = clean_line
+                            detail = clean_line[len("ERROR:"):].strip()
+                            self.log(f"Download failed: {detail}" if detail else "Download failed.", "error")
+                        elif clean_line.startswith("[Merger] Merging"):
+                            self.log("Combining video and audio...", "info")
+                        elif clean_line.startswith("[ExtractAudio] Destination:"):
+                            self.log("Converting audio to MP3...", "info")
+                        elif clean_line.startswith("[VideoRemuxer] Remuxing"):
+                            self.log("Preparing MP4...", "info")
+                        elif clean_line.startswith("[download]") and "has already been downloaded" in clean_line:
+                            self.log("Already downloaded.", "info")
 
         process.wait()
         if process.returncode == 0:
             self.log("Download complete.", "success")
+        elif last_error:
+            if last_output != last_error:
+                self.log("Download failed.", "error")
         elif last_output:
             self.log(f"Download failed: {last_output}", "error")
         else:

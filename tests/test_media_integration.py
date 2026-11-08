@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -81,10 +82,43 @@ class LocalMediaIntegrationTests(unittest.TestCase):
             'CODECS="avc1.42c033"\nuhd.m3u8\n',
             encoding="utf-8",
         )
+        fragments = []
+        for index in range(8):
+            name = f"fragment-{index}.ts"
+            shutil.copyfile(source / "low.ts", source / name)
+            fragments.append(f"#EXTINF:1.0,\n{name}\n")
+        (source / "fragments.m3u8").write_text(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n"
+            "#EXT-X-MEDIA-SEQUENCE:0\n" + "".join(fragments) + "#EXT-X-ENDLIST\n",
+            encoding="utf-8",
+        )
+        (source / "parallel.m3u8").write_text(
+            "#EXTM3U\n#EXT-X-VERSION:3\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=160x90,'
+            'CODECS="avc1.42c00b"\nfragments.m3u8\n',
+            encoding="utf-8",
+        )
+
+        cls.fragment_lock = threading.Lock()
+        cls.active_fragments = 0
+        cls.peak_fragments = 0
 
         class QuietHandler(http.server.SimpleHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def do_GET(self):
+                if not self.path.startswith("/fragment-"):
+                    return super().do_GET()
+                with cls.fragment_lock:
+                    cls.active_fragments += 1
+                    cls.peak_fragments = max(cls.peak_fragments, cls.active_fragments)
+                try:
+                    time.sleep(0.2)
+                    return super().do_GET()
+                finally:
+                    with cls.fragment_lock:
+                        cls.active_fragments -= 1
 
         cls.server = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), functools.partial(QuietHandler, directory=str(source))
@@ -128,7 +162,7 @@ class LocalMediaIntegrationTests(unittest.TestCase):
         self.assertEqual(videos[0]["height"], expected_height)
         self.assertTrue(audios)
         self.assertIn("mp4", data["format"]["format_name"])
-        self.assertTrue(any("[Merger]" in message for message, _ in self.messages))
+        self.assertIn(("Combining video and audio...", "info"), self.messages)
 
     def test_4k_merges_separate_video_and_audio(self):
         self.download("mp4", 2160)
@@ -155,6 +189,15 @@ class LocalMediaIntegrationTests(unittest.TestCase):
         videos = [stream for stream in data["streams"] if stream["codec_type"] == "video"]
         self.assertEqual(videos[0]["height"], 2160)
         self.assertFalse(any(stream["codec_type"] == "audio" for stream in data["streams"]))
+
+    def test_hls_fragments_are_downloaded_concurrently(self):
+        with self.fragment_lock:
+            type(self).peak_fragments = 0
+        self.download("mp4", 720, self.url.replace("master.m3u8", "parallel.m3u8"))
+        data = self.probe_output("mp4")
+        self.assertTrue(any(stream["codec_type"] == "video" for stream in data["streams"]))
+        self.assertGreaterEqual(type(self).peak_fragments, 2)
+        self.assertLessEqual(type(self).peak_fragments, 4)
 
     def test_format_selector_prefers_m4a_audio_and_falls_back_when_unavailable(self):
         process = Mock(stdout=io.StringIO(""), returncode=0)
