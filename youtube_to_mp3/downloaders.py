@@ -44,13 +44,11 @@ def local_ffmpeg_directory(target_path):
 
 
 def extract_percent(text):
-    match = re.search(r"(\d{1,3}(?:\.\d+)?)%", text)
+    match = re.match(r"^\[download\]\s+(\d{1,3}(?:\.\d+)?)%(?:\s|$)", text)
     if not match:
         return None
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return None
+    percent = float(match.group(1))
+    return percent if percent <= 100 else None
 
 
 class DownloadManager:
@@ -163,7 +161,18 @@ class DownloadManager:
         self.download_ffmpeg(target_path)
         return True
 
-    def ensure_ytdlp_and_download(self, url, target_path, no_playlist):
+    def ensure_ytdlp_and_download(
+        self, url, target_path, no_playlist, output_format="mp3", video_height=None
+    ):
+        if output_format not in {"mp3", "mp4"}:
+            raise ValueError("Unsupported download format.")
+        if video_height is not None and (
+            isinstance(video_height, bool)
+            or not isinstance(video_height, int)
+            or video_height <= 0
+        ):
+            raise ValueError("Video quality must be a positive resolution.")
+
         self.log("Checking yt-dlp...", "warning")
         os.makedirs(target_path, exist_ok=True)
 
@@ -172,7 +181,7 @@ class DownloadManager:
             self.download_yt_dlp(ytdlp_path)
 
         self.ensure_ffmpeg(target_path)
-        self.download_audio(url, target_path, no_playlist)
+        self.download_media(url, target_path, no_playlist, output_format, video_height)
 
     def force_update_yt(self, target_path):
         os.makedirs(target_path, exist_ok=True)
@@ -252,14 +261,11 @@ class DownloadManager:
         else:
             self.log("Download tool updates failed.", "error")
 
-    def download_audio(self, url, target_path, no_playlist):
+    def download_media(self, url, target_path, no_playlist, output_format, video_height):
         ytdlp_path = os.path.join(target_path, "yt-dlp.exe")
         cmd = [
             ytdlp_path,
             "--newline",
-            "-x",
-            "--audio-format",
-            "mp3",
             "--user-agent",
             BROWSER_USER_AGENT,
             "--referer",
@@ -267,6 +273,21 @@ class DownloadManager:
             "-o",
             os.path.join(target_path, "%(title)s.%(ext)s"),
         ]
+        if output_format == "mp3":
+            cmd.extend(["-x", "--audio-format", "mp3"])
+        else:
+            height_filter = f"[height<={video_height}]" if video_height else ""
+            cmd.extend(
+                [
+                    "-f",
+                    f"bv*{height_filter}+ba[ext=m4a]/"
+                    f"bv*{height_filter}+ba/b{height_filter}/bv*{height_filter}",
+                    "--merge-output-format",
+                    "mp4",
+                    "--remux-video",
+                    "mp4",
+                ]
+            )
         ffmpeg_directory = local_ffmpeg_directory(target_path)
         if ffmpeg_directory:
             cmd.extend(["--ffmpeg-location", ffmpeg_directory])
@@ -274,7 +295,7 @@ class DownloadManager:
             cmd.append("--no-playlist")
         cmd.append(url)
 
-        self.log("Downloading audio...", "warning")
+        self.log(f"Downloading {'audio' if output_format == 'mp3' else 'video'}...", "warning")
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -287,16 +308,15 @@ class DownloadManager:
 
         last_output = ""
         if process.stdout is not None:
-            for line in process.stdout:
-                for part in re.split(r"[\r\n]+", line):
-                    clean_line = part.strip()
-                    if not clean_line:
-                        continue
-                    last_output = clean_line
-                    self.log(clean_line, "process")
-                    percent = extract_percent(clean_line)
-                    if percent is not None:
-                        self.log(f"Downloading... {percent:.0f}%", "warning")
+            with process.stdout:
+                for line in process.stdout:
+                    for part in re.split(r"[\r\n]+", line):
+                        clean_line = part.strip()
+                        if not clean_line:
+                            continue
+                        last_output = clean_line
+                        level = "progress" if extract_percent(clean_line) is not None else "process"
+                        self.log(clean_line, level)
 
         process.wait()
         if process.returncode == 0:

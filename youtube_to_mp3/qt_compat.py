@@ -3,13 +3,17 @@ import os
 from youtube_to_mp3.runtime import ICON_PATH
 
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
-from PyQt6.QtGui import QIcon, QTextCursor
+from PyQt6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
+    QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
