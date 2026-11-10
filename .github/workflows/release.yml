@@ -20,10 +20,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Set up Python for upgrade compatibility test
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install media test tools
+        shell: pwsh
+        run: |
+          python -m pip install "yt-dlp==2026.7.4"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          choco install ffmpeg --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($tool in @("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe")) {
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool is required for media tests." }
+          }
 
       - name: Determine next patch version
         id: version
@@ -53,42 +64,62 @@ jobs:
           "app_version=$next" >> $env:GITHUB_OUTPUT
           "previous_tag=$previousTag" >> $env:GITHUB_OUTPUT
 
-      - name: Bake release version
+      - name: Test Rust application
+        shell: pwsh
+        env:
+          YTDLP_APP_VERSION: ${{ steps.version.outputs.app_version }}
+          YTDLP_REQUIRE_MEDIA_TOOLS: "1"
+        run: |
+          cargo test --locked --manifest-path "rust-app\Cargo.toml" --target-dir "rust-app\target"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build portable executables
+        shell: pwsh
+        env:
+          YTDLP_APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: |
+          cargo build --locked --release --manifest-path "rust-app\Cargo.toml" --target-dir "rust-app\target"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "dist" -Force | Out-Null
+          $binary = "rust-app\target\release\youtube-to-mp3.exe"
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "The Rust release executable was not produced."
+          }
+          Copy-Item -LiteralPath $binary -Destination "dist\YouTube to MP3.exe"
+          Copy-Item -LiteralPath $binary -Destination "dist\YouTube.to.MP3.Rust.exe"
+          $legacyHash = (Get-FileHash -LiteralPath "dist\YouTube to MP3.exe" -Algorithm SHA256).Hash
+          $rustHash = (Get-FileHash -LiteralPath "dist\YouTube.to.MP3.Rust.exe" -Algorithm SHA256).Hash
+          if ($legacyHash -ne $rustHash) {
+            throw "The legacy and Rust updater assets do not match."
+          }
+
+      - name: Test upgrade from the released Python app
         shell: pwsh
         run: |
-          Set-Content -Path "youtube_to_mp3\_version_build.py" -Value "APP_VERSION = `"${{ steps.version.outputs.app_version }}`"" -Encoding UTF8
-
-      - name: Install build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
-
-      - name: Build portable executable
-        run: |
-          python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --windowed `
-            --icon "icon.ico" `
-            --name "YouTube to MP3" `
-            --add-data "icon.ico;." `
-            "app.py"
+          python "rust-app\tests\test_legacy_upgrade.py" "dist\YouTube to MP3.exe" "dist\YouTube.to.MP3.Rust.exe" "${{ steps.version.outputs.app_version }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Inno Setup
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build installer
         shell: pwsh
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            throw "Inno Setup compiler was not found at $iscc"
-          }
+          $candidates = @(
+            (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source),
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup compiler was not found." }
           $version = "${{ steps.version.outputs.app_version }}"
           & $iscc "/DMyAppVersion=$version" "installer\YoutubeToMP3.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Generate release notes
         shell: pwsh
@@ -108,8 +139,9 @@ jobs:
           ) + $commits + @(
             "",
             "## Download",
-            "- ``YouTube to MP3 Setup.exe`` installs to ``%LocalAppData%\Programs\YouTube to MP3`` and can add Start Menu and desktop shortcuts.",
-            "- ``YouTube to MP3.exe`` is the portable version."
+            "- ``YouTube.to.MP3.Setup.exe`` installs to ``%LocalAppData%\Programs\YouTube to MP3`` and can add Start Menu and desktop shortcuts.",
+            "- ``YouTube.to.MP3.exe`` is the portable version and upgrades existing installations.",
+            "- ``YouTube.to.MP3.Rust.exe`` is the identical portable build used by the Rust updater."
           )
           Set-Content -Path "release_notes.md" -Value $notes -Encoding UTF8
 
@@ -119,6 +151,7 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.version }}" `
             "dist\YouTube to MP3.exe" `
+            "dist\YouTube.to.MP3.Rust.exe" `
             "installer\output\YouTube to MP3 Setup.exe" `
             --title "${{ steps.version.outputs.version }}" `
             --notes-file "release_notes.md" `

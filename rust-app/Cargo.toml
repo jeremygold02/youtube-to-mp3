@@ -1,0 +1,25 @@
+[package]
+name = "youtube-to-mp3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow"] }
+rfd = { version = "=0.18.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
+url = "2"
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+winres = "0.1.12"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
