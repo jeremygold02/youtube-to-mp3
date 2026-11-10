@@ -124,8 +124,17 @@ def run_test(legacy_asset: Path, rust_asset: Path, version: str) -> None:
             raise AssertionError(f"Legacy updater helper failed: {completed.stdout}\n{completed.stderr}")
         if sha256(target) != expected_hash:
             raise AssertionError("The old executable was not replaced with the Rust binary.")
-        if Path(capture.read_text(encoding="utf-8")) != target:
-            raise AssertionError("The updater did not request restart of the migrated executable.")
+        restart_target = Path(capture.read_text(encoding="utf-8-sig"))
+        try:
+            same_target = os.path.samefile(restart_target, target)
+        except OSError as error:
+            raise AssertionError(
+                f"Could not compare restart target {restart_target!s} with {target!s}: {error}"
+            ) from error
+        if not same_target:
+            raise AssertionError(
+                f"The updater requested restart of {restart_target!s}, expected {target!s}."
+            )
 
         # --version is a headless path and must not create a window or read settings.
         actual = subprocess.run(
@@ -139,7 +148,7 @@ def run_test(legacy_asset: Path, rust_asset: Path, version: str) -> None:
         if actual != version:
             raise AssertionError(f"Migrated executable reports {actual!r}, expected {version!r}.")
 
-    print(f"Legacy Python updater selected, replaced, and restarted Rust {version} (headless).")
+    print(f"Legacy Python updater selected and replaced Rust {version}, and requested its restart (headless).")
 
 
 if __name__ == "__main__":
